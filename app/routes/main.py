@@ -4,9 +4,13 @@ from pydantic import ValidationError
 from app import db
 from bson import ObjectId
 from app.models.products import *
+from app.models.sale import Sale
 from app.decorators import token_required
 from datetime import datetime, timedelta, timezone
 import jwt
+import csv
+import os
+import io
 
 main_bp = Blueprint('main_bp', __name__)
 
@@ -86,22 +90,70 @@ def update_product(token, product_id):
     
     update_result = db.products.update_one(
         {"_id": oid},
-        {"$set": update_data.model_dump}
+        {"$set": update_data.model_dump(exclude_unset=True)}
     )
 
-    if update_product
-
-    return jsonify({'message':f'Esta é a rota de atualização do produto {product_id}!'})
+    if update_result.matched_count == 0:
+        return jsonify({'error':'Produto não encontrado.'}), 404
+    
+    updated_product = db.products.find_one({"_id": oid})
+    updated_product = ProductDBModel(**updated_product).model_dump(by_alias=True, exclude_none=True)
+    return jsonify(updated_product)
 
 # RF: O sistema deve permitir a delecao de um unico produto e produto existente
 @main_bp.route('/product/<string:product_id>', methods=['DELETE'])
-def delete_product(product_id):
-    return jsonify({'message':f'Esta é a rota de deleção do produto {product_id}!'})
+@token_required
+def delete_product(token, product_id):
+    try:
+        oid = ObjectId(product_id)
+    except Exception:
+        return jsonify({'error':'Id do produto inválido.'}), 400
+    
+    deleted_product = db.products.delete_one({"_id": oid})
+    if deleted_product.deleted_count == 0:
+        return jsonify({'error':'Produto não encontrado.'}), 404
+    
+    return "", 204
 
 # RF: O sistema deve permitir a importacao de vendas através de um arquivo
 @main_bp.route('/sales/upload', methods=['POST'])
-def upload_sales():
-    return jsonify({'message':'Esta é a rota do upload do arquivo de vendas!'})
+@token_required
+def upload_sales(token):
+    if 'file' not in request.files:
+        return jsonify({'error':'Nenhum arquivo foi enviado.'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error':'Nenhum arquivo selecionado.'}), 400
+    
+    if file and file.filename.endswith('.csv'):
+        csv_stream = io.StringIO(file.stream.read().decode('UTF-8'), newline=None)
+        csv_reader = csv.DictReader(csv_stream)
+
+        sales_to_insert = []
+        errors = []
+
+        for row_num, row in enumerate(csv_reader, 1):
+            try:
+                sale_data = Sale(**row)
+                sales_to_insert.append(sale_data.model_dump())
+            except ValidationError as e:
+                errors.append(f'Linha {row_num} com dados inválidos.')
+            except Exception:
+                errors.append(f'Linha {row_num} com erro inesperado nos dados.')
+
+        if sales_to_insert:
+            try:
+                db.sales.insert_many(sales_to_insert)
+            except Exception as e:
+                return jsonify({'error':f'{e}'})
+        return jsonify({
+            "message": "Upload realizado com sucesso.",
+            "vendas importadas": len(sales_to_insert),
+            "erros encontrados": errors
+        }), 200
+    
+    return jsonify({'error':'Formato de '})
 
 @main_bp.route('/')
 def index():
